@@ -1,0 +1,342 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: 'AWS Bedrock GenAI Chatbot - Full-stack serverless application'
+
+Parameters:
+  Environment:
+    Type: String
+    Default: prod
+    AllowedValues: [prod, staging, dev]
+    Description: Environment name
+  
+  CorsOrigin:
+    Type: String
+    Default: '*'
+    Description: CORS origin for API Gateway (use specific domain in production)
+    
+  EnableAPIKey:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+    Description: Enable API Gateway API key for production security
+
+Globals:
+  Function:
+    Timeout: 60
+    MemorySize: 512
+    Runtime: python3.11
+    Environment:
+      Variables:
+        ENVIRONMENT: !Ref Environment
+        CHAT_HISTORY_TABLE: !Ref ChatHistoryTable
+        LOGS_BUCKET: !Ref LogsBucket
+
+Resources:
+  # DynamoDB Table for Chat History
+  ChatHistoryTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub 'bedrock-chat-history-${Environment}'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: session_id
+          AttributeType: S
+        - AttributeName: timestamp
+          AttributeType: S
+      KeySchema:
+        - AttributeName: session_id
+          KeyType: HASH
+        - AttributeName: timestamp
+          KeyType: RANGE
+      StreamSpecification:
+        StreamViewType: NEW_AND_OLD_IMAGES
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: BedrockChatbot
+
+  # S3 Bucket for Logs
+  LogsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub 'bedrock-chat-logs-${Environment}-${AWS::AccountId}'
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: DeleteOldLogs
+            Status: Enabled
+            ExpirationInDays: 90
+            Transitions:
+              - TransitionInDays: 30
+                StorageClass: STANDARD_IA
+              - TransitionInDays: 60
+                StorageClass: GLACIER
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: BedrockChatbot
+
+  # IAM Role for Lambda
+  BedrockChatbotRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'BedrockChatbotRole-${Environment}'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: BedrockAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                  - bedrock:InvokeModelWithResponseStream
+                  - bedrock:GetFoundationModel
+                  - bedrock:ListFoundationModels
+                Resource: '*'
+        - PolicyName: DynamoDBAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                Resource: !GetAtt ChatHistoryTable.Arn
+        - PolicyName: S3Access
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                Resource: !Sub '${LogsBucket.Arn}/*'
+
+  # Lambda Function
+  BedrockChatbotFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub 'bedrock-chatbot-handler-${Environment}'
+      CodeUri: lambda/
+      Handler: bedrock_handler.lambda_handler
+      Role: !GetAtt BedrockChatbotRole.Arn
+      Events:
+        ChatApi:
+          Type: Api
+          Properties:
+            RestApiId: !Ref BedrockChatbotApi
+            Path: /chat
+            Method: post
+        OptionsApi:
+          Type: Api
+          Properties:
+            RestApiId: !Ref BedrockChatbotApi
+            Path: /chat
+            Method: options
+      Tags:
+        Environment: !Ref Environment
+        Project: BedrockChatbot
+
+  # Models List Function
+  ModelsListFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub 'bedrock-models-list-${Environment}'
+      CodeUri: lambda/
+      Handler: models_handler.lambda_handler
+      Role: !GetAtt BedrockChatbotRole.Arn
+      Events:
+        ModelsApi:
+          Type: Api
+          Properties:
+            RestApiId: !Ref BedrockChatbotApi
+            Path: /models
+            Method: get
+
+  # API Gateway
+  BedrockChatbotApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      Name: !Sub 'bedrock-chatbot-api-${Environment}'
+      StageName: !Ref Environment
+      Cors:
+        AllowMethods: "'GET,POST,PUT,DELETE,OPTIONS'"
+        AllowHeaders: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+        AllowOrigin: !Sub "'${CorsOrigin}'"
+        MaxAge: "'600'"
+      DefinitionBody:
+        openapi: 3.0.1
+        info:
+          title: !Sub 'Bedrock Chatbot API - ${Environment}'
+          version: 1.0.0
+        paths:
+          /chat:
+            post:
+              x-amazon-apigateway-integration:
+                httpMethod: POST
+                type: aws_proxy
+                uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${BedrockChatbotFunction.Arn}/invocations'
+              responses: {}
+            options:
+              x-amazon-apigateway-integration:
+                httpMethod: POST
+                type: aws_proxy
+                uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${BedrockChatbotFunction.Arn}/invocations'
+              responses: {}
+          /models:
+            get:
+              x-amazon-apigateway-integration:
+                httpMethod: POST
+                type: aws_proxy
+                uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ModelsListFunction.Arn}/invocations'
+              responses: {}
+
+  # CloudWatch Log Groups
+  BedrockChatbotLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/bedrock-chatbot-handler-${Environment}'
+      RetentionInDays: 14
+
+  ModelsListLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/bedrock-models-list-${Environment}'
+      RetentionInDays: 14
+
+  # CloudWatch Dashboard
+  ChatbotDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: !Sub 'BedrockChatbot-${Environment}'
+      DashboardBody: !Sub |
+        {
+          "widgets": [
+            {
+              "type": "metric",
+              "x": 0,
+              "y": 0,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "metrics": [
+                  [ "AWS/Lambda", "Invocations", "FunctionName", "${BedrockChatbotFunction}" ],
+                  [ ".", "Errors", ".", "." ],
+                  [ ".", "Duration", ".", "." ]
+                ],
+                "period": 300,
+                "stat": "Sum",
+                "region": "${AWS::Region}",
+                "title": "Lambda Metrics"
+              }
+            },
+            {
+              "type": "metric",
+              "x": 12,
+              "y": 0,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "metrics": [
+                  [ "AWS/DynamoDB", "ConsumedReadCapacityUnits", "TableName", "${ChatHistoryTable}" ],
+                  [ ".", "ConsumedWriteCapacityUnits", ".", "." ]
+                ],
+                "period": 300,
+                "stat": "Sum",
+                "region": "${AWS::Region}",
+                "title": "DynamoDB Metrics"
+              }
+            }
+          ]
+        }
+
+  # Optional: Cognito User Pool (uncomment if authentication is needed)
+  # UserPool:
+  #   Type: AWS::Cognito::UserPool
+  #   Properties:
+  #     UserPoolName: !Sub 'bedrock-chatbot-users-${Environment}'
+  #     AutoVerifiedAttributes:
+  #       - email
+  #     UsernameAttributes:
+  #       - email
+  #     Policies:
+  #       PasswordPolicy:
+  #         MinimumLength: 8
+  #         RequireUppercase: true
+  #         RequireLowercase: true
+  #         RequireNumbers: true
+  #         RequireSymbols: false
+
+  # UserPoolClient:
+  #   Type: AWS::Cognito::UserPoolClient
+  #   Properties:
+  #     UserPoolId: !Ref UserPool
+  #     ClientName: !Sub 'bedrock-chatbot-client-${Environment}'
+  #     ExplicitAuthFlows:
+  #       - ADMIN_NO_SRP_AUTH
+  #       - ALLOW_USER_PASSWORD_AUTH
+  #       - ALLOW_REFRESH_TOKEN_AUTH
+  #     GenerateSecret: true
+
+Outputs:
+  ApiEndpoint:
+    Description: 'API Gateway endpoint URL'
+    Value: !Sub 'https://${BedrockChatbotApi}.execute-api.${AWS::Region}.amazonaws.com/${Environment}'
+    Export:
+      Name: !Sub '${AWS::StackName}-ApiEndpoint'
+
+  ChatHistoryTableName:
+    Description: 'DynamoDB table name for chat history'
+    Value: !Ref ChatHistoryTable
+    Export:
+      Name: !Sub '${AWS::StackName}-ChatHistoryTable'
+
+  LogsBucketName:
+    Description: 'S3 bucket name for logs'
+    Value: !Ref LogsBucket
+    Export:
+      Name: !Sub '${AWS::StackName}-LogsBucket'
+
+  LambdaFunctionArn:
+    Description: 'Lambda function ARN'
+    Value: !GetAtt BedrockChatbotFunction.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-LambdaArn'
+
+  # UserPoolId:
+  #   Description: 'Cognito User Pool ID'
+  #   Value: !Ref UserPool
+  #   Export:
+  #     Name: !Sub '${AWS::StackName}-UserPoolId'
+
+  # UserPoolClientId:
+  #   Description: 'Cognito User Pool Client ID'
+  #   Value: !Ref UserPoolClient
+  #   Export:
+  #     Name: !Sub '${AWS::StackName}-UserPoolClientId'

@@ -1,0 +1,180 @@
+openapi: 3.0.1
+info:
+  title: Bedrock GenAI Chatbot API
+  description: API for GenAI-powered chatbot using AWS Bedrock foundation models
+  version: 1.0.0
+  contact:
+    name: Bedrock Chatbot API
+    email: support@example.com
+
+servers:
+  - url: https://your-api-id.execute-api.us-east-1.amazonaws.com/prod
+    description: Production server
+
+paths:
+  /chat:
+    post:
+      summary: Send a chat message
+      description: Send a message to the GenAI chatbot and receive a response
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - message
+              properties:
+                message:
+                  type: string
+                  description: The user's message
+                  example: "What are the company's vacation policies?"
+                session_id:
+                  type: string
+                  description: Session ID for conversation context
+                  example: "uuid-string"
+                domain:
+                  type: string
+                  enum: [hr, medical, legal, finance, general]
+                  default: general
+                  description: Domain specialization for the chatbot
+                  example: "hr"
+                model_id:
+                  type: string
+                  enum: 
+                    - "anthropic.claude-3-sonnet-20240229-v1:0"
+                    - "anthropic.claude-3-haiku-20240307-v1:0"
+                    - "meta.llama3-70b-instruct-v1:0"
+                    - "ai21.j2-ultra-v1"
+                  default: "anthropic.claude-3-sonnet-20240229-v1:0"
+                  description: Bedrock foundation model to use
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  response:
+                    type: string
+                    description: The chatbot's response
+                    example: "Our company offers 15 days of paid vacation..."
+                  session_id:
+                    type: string
+                    description: Session ID for the conversation
+                  domain:
+                    type: string
+                    description: Domain used for the response
+                  model_used:
+                    type: string
+                    description: Foundation model that generated the response
+        '400':
+          description: Bad request
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+                    example: "Message is required"
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+                    example: "Internal server error"
+    
+    options:
+      summary: CORS preflight
+      description: CORS preflight request
+      responses:
+        '200':
+          description: CORS headers
+          headers:
+            Access-Control-Allow-Origin:
+              schema:
+                type: string
+            Access-Control-Allow-Methods:
+              schema:
+                type: string
+            Access-Control-Allow-Headers:
+              schema:
+                type: string
+
+  /models:
+    get:
+      summary: List available foundation models
+      description: Get list of available Bedrock foundation models
+      responses:
+        '200':
+          description: List of available models
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  models:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        model_id:
+                          type: string
+                        model_name:
+                          type: string
+                        provider:
+                          type: string
+                        description:
+                          type: string
+
+components:
+  schemas:
+    ChatRequest:
+      type: object
+      required:
+        - message
+      properties:
+        message:
+          type: string
+        session_id:
+          type: string
+        domain:
+          type: string
+          enum: [hr, medical, legal, finance, general]
+        model_id:
+          type: string
+    
+    ChatResponse:
+      type: object
+      properties:
+        response:
+          type: string
+        session_id:
+          type: string
+        domain:
+          type: string
+        model_used:
+          type: string
+    
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: string
+
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
+      description: API Key for authentication (if enabled)
+
+# Optional security (can be enabled with API Gateway API Keys)
+# security:
+#   - ApiKeyAuth: []
